@@ -1,0 +1,187 @@
+---
+title: "Mobster Practical"
+author: "Salvatore MIlite"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+We will install mobster and his hierarchical version. You first need to have installed reticulate. Then we will create an environment where we can install the python dependencies.
+
+```{r setup}
+#install.packages(reticulate)
+library(reticulate)
+reticulate::conda_create("mobster_lesson")
+reticulate::use_condaenv("mobster_lesson")
+reticulate::py_install("pyro-ppl", forge = T)
+#devtools::install_github("caravagnalab/CNAqc")
+
+devtools::install_github("caravagnalab/mobster@binomial_noise")
+```
+
+```{r}
+library(mobster)
+library(tidyverse)
+library(CNAqc)
+```
+
+
+# MOBSTER
+
+We will first show how to use the old mobster. Our example will be a sample of WGS from the PCAWG consortium. The data is public and available here https://dcc.icgc.org/releases/PCAWG
+
+```{r}
+
+# This is a CNAqc object which has inside both the information about 
+# SNVs and Copy Numbers
+data <- readRDS("practical_example_data.rds")
+
+# As mobster does not take into account the copy number
+# we have to select SNVs in a specific karyotype
+input_mobster <- data$cnaqc$snvs %>% filter(karyotype == "1:1")
+
+```
+Mobster has a template of parameters for fast inference (which generally performs well in most situations)
+
+```{r}
+mobster:::template_parameters_fast_setup()
+
+```
+
+```{r}
+fit = mobster_fit(
+  input_mobster,    
+  auto_setup = "FAST"
+  )
+```
+We can see how the model here performs well and correctly identifies the subclonal cluster C2.
+
+```{r}
+plot(fit$best)
+
+```
+We can also see how using the information in the tail we can infer some evolutionary variables such as the mutation rate.
+
+```{r}
+evolutionary_parameters(fit)
+
+```
+
+To provide confidence intervals for his parameters, MOBSTER performs bootstrap inference. This procedure is parallelized.
+
+```{r}
+bootstrap_results = mobster_bootstrap(
+  fit$best,
+  bootstrap = 'nonparametric',
+  n.resamples = 20,
+  auto_setup = 'FAST'
+  )
+
+bootstrap_statistics = bootstrapped_statistics(
+  fit$best, 
+  bootstrap_results = bootstrap_results
+  )
+```
+
+```{r}
+# Plot the mixing proportions
+mplot = plot_bootstrap_mixing_proportions(
+  fit$best, 
+  bootstrap_results = bootstrap_results, 
+  bootstrap_statistics = bootstrap_statistics
+  )
+
+# Plot the tail parameters
+tplot = plot_bootstrap_tail(
+  fit$best, 
+  bootstrap_results = bootstrap_results, 
+  bootstrap_statistics = bootstrap_statistics
+  )
+
+# Plot the Beta parameters
+bplot = plot_bootstrap_Beta(
+  fit$best, 
+  bootstrap_results = bootstrap_results, 
+  bootstrap_statistics = bootstrap_statistics
+  )
+
+# Figure
+figure = ggpubr::ggarrange(
+  mplot,
+  tplot,
+  bplot,
+  ncol = 3, nrow = 1,
+  widths = c(.7, 1, 1.2)
+) %>%  plot()
+```
+```{r}
+plot_bootstrap_coclustering(
+  fit$best, 
+  bootstrap_results = bootstrap_results, 
+  bootstrap_statistics = bootstrap_statistics
+  )
+```
+
+
+# MOBSTERH
+
+Mobsterh can fit the whole dataset as long as we provide the karyotype annotations. Note also that here we will not fit the VAF but the number of reads with the variant (NV in the dataset), we will also need the depth (DP in the dataset)
+
+```{r}
+# With mobsterh we can give the full object as
+# long as it has a coloumn with karyotype annotations
+input_mobsterh <- data$cnaqc$snvs
+
+# mobsterh uses also the purity, which is 
+# a value usually inferred during CNA calling
+purity <- data$cnaqc$purity
+```
+
+At the moment mobsterh comes with a pletora of parameters that allow for full customization of the inference.
+
+```{r}
+mobsterh_beta <- mobsterh_fit(
+  x = input_mobsterh,
+  purity = purity,
+  karyotypes = c('1:0', '1:1', '2:0', '2:1', '2:2'), # karyotypes to fit
+  vaf_filter  = 0.06, # VAF cut on the left 
+  model.selection = "BIC",
+  description = "Example lesson", # sample name
+  N_MAX = 20000, # Subsetting of the mutation id N_muts > NMAX, preserves drivers
+  subclonal_clusters = 1:2, # how many subclonal clusters to test
+  lr = 0.00001,# learning rate
+  epsilon = 0.000001, # tolerance to stop
+  maxIter = 100,# maximum number of iterations
+  number_of_trials_subclonal = 200, #  controls prior variance of the subclonal cluster, the higher the smaller you expect subclone to be
+  number_of_trials_clonal_mean = 200, # Prior on clonal cluster position, the higher the more I penalize peaks far away from theoretical value
+  subclonal_prior = "Beta", # Moyal or Beta for subclonal distribution
+  prior_lims_clonal = c(1, 1e+05), # limits on the variance for subclonal and clonal clusters, non informative
+  prior_lims_k = c(1, 1e+05),
+  truncate_pareto = TRUE, # truncate the pareto?,
+  n_t =20, #minimum number of mutations per karyotype
+  NV_filter = 3, #minimum number of reads with mutation
+  filter_indels = F # Use only SNVs
+)
+
+```
+Note that here we split the plot for each karyotype (even though some variables are shared). Also we are visualizing VAF as in the older mobster, but the actual fit is made with NV and DP
+```{r}
+plot(mobsterh_beta$best, empty_plot = F)
+```
+We can as well get the information about evolutionary parameters like mutation rate.
+
+```{r}
+#mobster:::mu_posterior(mobsterh_beta$best)
+mobster:::mu_posterior(mobsterh_beta$best)$plot
+
+```
+
+```{r}
+samples_posteriorr <- mobster:::posterior_predictive_checks(mobsterh_beta$best)
+```
+
+Being fully bayesian, mobsterh does not use bootstrap or other non-parametric procedure to estimate parameters, but rather it returns distributions. A way of estimating the uncertainty of the fit, in these framework is the so called posterior predictive checking.
+
+```{r}
+mobster:::plot_random_samples_overlay(obj = mobsterh_beta$best, samples_posteriorr, type = "ecdf" )
+```
+
